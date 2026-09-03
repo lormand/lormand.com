@@ -1,0 +1,82 @@
+# Deploy the existing hello-world site (index.html + CNAME) to GitHub Pages.
+# Prefer publishing from branch main at / (legacy). If the token cannot create a
+# Pages site that way, fall back to the official Actions deploy path.
+name: Deploy GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  enable-from-branch:
+    name: Enable Pages from main /
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.enable.outputs.enabled }}
+    steps:
+      - name: Create Pages site from branch main
+        id: enable
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}/pages"
+          AUTH=( -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" )
+
+          echo "POST ${API} build_type=legacy source=main:/"
+          HTTP=$(curl -sS -o /tmp/pages.json -w "%{http_code}" -X POST "${AUTH[@]}" \
+            "$API" -d '{"build_type":"legacy","source":{"branch":"main","path":"/"}}')
+          echo "HTTP ${HTTP}"
+          cat /tmp/pages.json || true
+          echo
+
+          if [[ "$HTTP" == "201" || "$HTTP" == "409" ]]; then
+            PUT_HTTP=$(curl -sS -o /tmp/pages-put.json -w "%{http_code}" -X PUT "${AUTH[@]}" \
+              "$API" -d '{"cname":"lormand.com","https_enforced":false,"build_type":"legacy","source":{"branch":"main","path":"/"}}')
+            echo "PUT cname=lormand.com HTTP ${PUT_HTTP}"
+            cat /tmp/pages-put.json || true
+            curl -sS -X POST "${AUTH[@]}" "${API}/builds" >/tmp/pages-build.json || true
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "Pages is configured from branch main, path /."
+            exit 0
+          fi
+
+          echo "enabled=false" >> "$GITHUB_OUTPUT"
+          echo "Could not create a branch-sourced Pages site (HTTP ${HTTP}). Actions deploy will try next."
+
+  deploy:
+    name: Deploy via GitHub Actions
+    needs: enable-from-branch
+    if: needs.enable-from-branch.outputs.enabled != 'true'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - name: Stage published files
+        run: |
+          mkdir _ghpages
+          cp index.html CNAME _ghpages/
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _ghpages
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
